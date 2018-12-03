@@ -233,10 +233,12 @@ else:
 pois = []  
   
 if options.POIMode == "mu":
-  npoi = nsignals
+  # npoi = nsignals
+  npoi = 1 # even if many signals, only one POI!
   poidefault = options.POIDefault*np.ones([npoi],dtype=dtype)
-  for signal in signals:
-    pois.append(signal)
+  # for signal in signals:
+    # pois.append(signal)
+  pois = ['mu']
 elif options.POIMode == "none":
   npoi = 0
   poidefault = np.empty([],dtype=dtype)
@@ -298,7 +300,7 @@ snorm = tf.exp(logsnorm)
 
 #vector encoding effect of signal strengths
 if options.POIMode == "mu":
-  r = poi
+  r = tf.tile(poi, [nsignals])
 elif options.POIMode == "none":
   r = tf.ones([nsignals],dtype=dtype)
 

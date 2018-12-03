@@ -523,5 +523,5 @@ namespace {
         gPluginMgr->AddHandler("ROOT::Math::Minimizer", "SeqMinimizer", "cmsmath::SequentialMinimizer", "HiggsAnalysisCombinedLimit", "SequentialMinimizer(const char *)");
         return 1;
     }
-    static int loaded_seqmin = load_seqmin();
+    //static int loaded_seqmin = load_seqmin();
 }

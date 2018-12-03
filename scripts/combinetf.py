@@ -321,7 +321,7 @@ for itoy in range(ntoys):
   #compute hessian
   hessval = hesscomp.compute(sess)
   #print(hessval.shape)
-  #print(hessval)
+  print(hessval)
   dnllval = 0.
   mineig = np.amin(np.linalg.eigvalsh(hessval))
   isposdef =  mineig > 0.
@@ -417,7 +417,7 @@ for itoy in range(ntoys):
       minoserrsdown = thetaminosdowns
       scanname = "x"
       outthetaval = xval
-      sigmas = thetasigmasv
+      sigmasv = thetasigmasv
     else:
       outname = var.split("_")[-1]
       poi = "_".join(var.split("_")[:-1])

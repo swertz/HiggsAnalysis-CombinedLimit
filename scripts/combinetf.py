@@ -321,7 +321,7 @@ for itoy in range(ntoys):
     #compute hessian
     hessval = hesscomp.compute(sess)
     #print(hessval.shape)
-    print(hessval)
+    # print(hessval)
     dnllval = 0.
     mineig = np.amin(np.linalg.eigvalsh(hessval))
     isposdef =    mineig > 0.

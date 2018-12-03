@@ -2,6 +2,7 @@
 import re
 from sys import argv, stdout, stderr, exit, modules
 from optparse import OptionParser
+from copy import deepcopy
 
 import tensorflow as tf
 import numpy as np
@@ -222,6 +223,66 @@ for chan in chans:
 #print(np.max(np.abs(logkup)))
 #print(np.max(np.abs(logkdown)))
 
+rateParams = {}
+for chan in chans:
+    rateParams[chan] = {}
+    for proc in procs:
+        rateParams[chan][proc] = {}
+dependentRateParams = deepcopy(rateParams)
+
+regex = re.compile(r'@([0-9]*)')
+def get_tf_variable(name):
+    return [var for var in tf.global_variables() if str(var.op.name) == name][0]
+
+for rp in DC.rateParams.items():
+    paramKey = rp[0]
+    channel = paramKey.split('AND')[0]
+    proc = paramKey.split('AND')[1]
+    paramCfg = rp[1][0]
+    
+    # FIXME bounds not used at the momemt
+    if paramCfg[1] == '':
+        bounds = None
+    else:
+        bounds = list(paramCfg[1])
+ 
+    paramCfg = paramCfg[0]
+    name = paramCfg[0]
+
+    if paramCfg[-1] == 0:
+        # actual parameter
+        default = float(paramCfg[1])
+
+        rateParams[channel][proc][name] = tf.Variable(default, dtype=dtype, name=name)
+
+    if paramCfg[-1] == 1:
+        # dependent parameter
+        formula = paramCfg[1]
+        formula = regex.sub(lambda x: 'get_tf_variable("{' + x.group(0).replace('@', '') + '}")', formula)
+        formulaInputs = paramCfg[2].split(',')
+
+        dependentRateParams[channel][proc][name] = (formula, formulaInputs)
+
+extArgs = {}
+for rp in DC.extArgs.items():
+    name = rp[0]
+    extArgs[name] = tf.Variable(float(rp[1][2]), dtype=dtype, name=name)
+
+for chan in chans:
+    for proc in procs:
+        for name, param in dependentRateParams[chan][proc].items():
+            formulaInputs = param[1]
+            formula = param[0].format(*formulaInputs)
+            # print("attempting to execute: {}".format(formula))
+            exec(name + "=" + formula)
+            rateParams[chan][proc][name] = locals()[name]
+
+freeParams = [ var for var in rateParams[chan][proc].values() for chan in chans for proc in procs ] + extArgs.values()
+# print(freeParams)
+# print(rateParams)
+# print(dependentRateParams)
+# print(extArgs)
+
 logkavg = 0.5*(logkup+logkdown)
 logkhalfdiff = 0.5*(logkup-logkdown)
 
@@ -290,7 +351,7 @@ theta = tf.identity(theta, name="theta")
 #interpolation for asymmetric log-normal
 twox = 2.*theta
 twox2 = twox*twox
-alpha =    0.125 * twox * (twox2 * (3*twox2 - 10.) + 15.)
+alpha = 0.125 * twox * (twox2 * (3*twox2 - 10.) + 15.)
 alpha = tf.clip_by_value(alpha,-1.,1.)
 logk = logkavg + alpha*logkhalfdiff
 

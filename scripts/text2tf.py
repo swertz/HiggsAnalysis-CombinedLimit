@@ -34,30 +34,35 @@ parser.add_option("--PO", "--physics-option", dest="physOpt", default=[],    typ
 parser.add_option("", "--dump-datacard", dest="dumpCard", default=False, action='store_true',    help="Print to screen the DataCard as a python config and exit")
 parser.add_option("","--allowNegativeExpectation", default=False, action='store_true', help="allow negative expectation")
 parser.add_option("","--POIMode", default="mu",type="string", help="mode for POI's")
-parser.add_option("","--nonNegativePOI", default=True, action='store_true', help="force signal strengths to be non-negative")
+parser.add_option("","--nonNegativePOI", default=False, action='store_true', help="force signal strengths to be non-negative")
 parser.add_option("","--POIDefault", default=1., type=float, help="mode for POI's")
 parser.add_option("","--maskedChan", default=[], type="string",action="append", help="channels to be masked in likelihood but propagated through for later storage/analysis")
 parser.add_option("-S","--doSystematics", type=int, default=1, help="enable systematics")
 (options, args) = parser.parse_args()
 
 if len(args) == 0:
-        parser.print_usage()
-        exit(1)
+    parser.print_usage()
+    exit(1)
+
+if options.nonNegativePOI:
+    boundmode = 1
+else:
+    boundmode = 0
 
 options.fileName = args[0]
 if options.fileName.endswith(".gz"):
-        import gzip
-        file = gzip.open(options.fileName, "rb")
-        options.fileName = options.fileName[:-3]
+    import gzip
+    file = gzip.open(options.fileName, "rb")
+    options.fileName = options.fileName[:-3]
 else:
-        file = open(options.fileName, "r")
+    file = open(options.fileName, "r")
 
 ## Parse text file
 DC = parseCard(file, options)
 
 if options.dumpCard:
-        DC.print_structure()
-        exit()
+    DC.print_structure()
+    exit()
 
 print(options)
 
@@ -231,8 +236,8 @@ for chan in chans:
 dependentRateParams = deepcopy(rateParams)
 
 regex = re.compile(r'@([0-9]*)')
-def get_tf_variable(name):
-    return [var for var in tf.global_variables() if str(var.op.name) == name][0]
+# def get_tf_variable(name):
+    # return [var for var in tf.global_variables() if str(var.op.name) == name][0]
 
 for rp in DC.rateParams.items():
     paramKey = rp[0]
@@ -252,13 +257,15 @@ for rp in DC.rateParams.items():
     if paramCfg[-1] == 0:
         # actual parameter
         default = float(paramCfg[1])
-
-        rateParams[channel][proc][name] = tf.Variable(default, dtype=dtype, name=name)
+        rateParams[channel][proc][name] = default
+        # print("Param {}: default value = {}".format(name, default))
+        # rateParams[channel][proc][name] = tf.Variable(default, dtype=dtype, name=name)
 
     if paramCfg[-1] == 1:
         # dependent parameter
         formula = paramCfg[1]
-        formula = regex.sub(lambda x: 'get_tf_variable("{' + x.group(0).replace('@', '') + '}")', formula)
+        # formula = regex.sub(lambda x: 'get_tf_variable("{' + x.group(0).replace('@', '') + '}")', formula)
+        formula = regex.sub(lambda x: 'graph.get_tensor_by_name("{' + x.group(0).replace('@', '') + '}:0")', formula)
         formulaInputs = paramCfg[2].split(',')
 
         dependentRateParams[channel][proc][name] = (formula, formulaInputs)
@@ -266,37 +273,31 @@ for rp in DC.rateParams.items():
 extArgs = {}
 for rp in DC.extArgs.items():
     name = rp[0]
-    extArgs[name] = tf.Variable(float(rp[1][2]), dtype=dtype, name=name)
+    # FIXME bounds not used at the momemt
+    default = float(rp[1][2])
+    extArgs[name] = default
+    # print("Param {}: default value = {}".format(name, default))
+    # extArgs[name] = tf.Variable(float(rp[1][2]), dtype=dtype, name=name)
 
+# freeParams only contains standalone parameters to be fitted
+freeParamDefault = extArgs.values()
+freeParamNames = extArgs.keys()
 for chan in chans:
     for proc in procs:
-        for name, param in dependentRateParams[chan][proc].items():
-            formulaInputs = param[1]
-            formula = param[0].format(*formulaInputs)
-            # print("attempting to execute: {}".format(formula))
-            exec(name + "=" + formula)
-            rateParams[chan][proc][name] = locals()[name]
+        for name, param in rateParams[chan][proc].items():
+            freeParamDefault.append(param)
+            freeParamNames.append(name)
+nFree = len(freeParamNames)
 
-freeParams = [ var for var in rateParams[chan][proc].values() for chan in chans for proc in procs ] + extArgs.values()
-# print(freeParams)
-# print(rateParams)
-# print(dependentRateParams)
-# print(extArgs)
 
-logkavg = 0.5*(logkup+logkdown)
-logkhalfdiff = 0.5*(logkup-logkdown)
-
-if options.nonNegativePOI:
-    boundmode = 1
-else:
-    boundmode = 0
+## Create variables to fit
 
 pois = []
 
 if options.POIMode == "mu":
     # npoi = nsignals
     npoi = 1 # even if many signals, only one POI!
-    poidefault = options.POIDefault*np.ones([npoi],dtype=dtype)
+    poidefault = options.POIDefault * np.ones([npoi],dtype=dtype)
     # for signal in signals:
         # pois.append(signal)
     pois = ['mu']
@@ -306,49 +307,138 @@ elif options.POIMode == "none":
 else:
     raise Exception("unsupported POIMode")
 
-nparms = npoi + nsyst
-parms = pois + systs
+nparams = npoi + nsyst + nFree
+params = pois + systs + freeParamNames
 
-if boundmode==0:
-    xpoidefault = poidefault
-elif boundmode==1:
+if boundmode:
     xpoidefault = np.sqrt(poidefault)
+else:
+    xpoidefault = poidefault
 
-print("nbins = %d, npoi = %d, nsyst = %d" % (data_obs.shape[0], npoi, nsyst))
+print("nbins = %d, npoi = %d, nsyst = %d, nFree = %d" % (data_obs.shape[0], npoi, nsyst, nFree))
 
 cprocs = tf.constant(procs,name="cprocs")
-csignals = tf.constant(signals,name="csignals")
-csysts = tf.constant(systs,name="csysts")
-cmaskedchans = tf.constant(maskedchans,name="cmaskedchans")
-cpois = tf.constant(pois,name="cpois")
+csignals = tf.constant(signals, name="csignals")
+# csysts = tf.concat([tf.constant(systs), tf.constant(freeParamNames)], axis=0, name="csysts")
+csysts = tf.constant(systs, name="csysts")
+cfrees = tf.constant(freeParamNames, name="cfrees")
+cmaskedchans = tf.constant(maskedchans, name="cmaskedchans")
+cpois = tf.constant(pois, name="cpois")
 
-#data
+# data
 nobs = tf.Variable(data_obs, trainable=False, name="nobs")
-theta0 = tf.Variable(tf.zeros([nsyst],dtype=dtype), trainable=False, name="theta0")
+# randomised nuisances
+theta0 = tf.Variable(tf.zeros([nsyst], dtype=dtype), trainable=False, name="theta0")
 
-#tf variable containing all fit parameters
-thetadefault = tf.zeros([nsyst],dtype=dtype)
-if npoi>0:
-    xdefault = tf.concat([xpoidefault,thetadefault], axis=0)
+# tf variable containing all fit parameters
+thetadefault = tf.zeros([nsyst], dtype=dtype)
+freeParamDefault = tf.constant(freeParamDefault, dtype=dtype, name="free0")
+if npoi > 0:
+    xdefault = tf.concat([xpoidefault, thetadefault, freeParamDefault], axis=0)
 else:
-    xdefault = thetadefault
+    xdefault = tf.concact([thetadefault, freeParamDefault], axis=0)
 
-x = tf.Variable(xdefault, name="x")
+x = tf.Variable(xdefault, name='x')
 
 xpoi = x[:npoi]
-theta = x[npoi:]
+theta = x[npoi:npoi+nsyst]
+free = x[npoi+nsyst:]
 
-if boundmode == 0:
-    poi = xpoi
-elif boundmode == 1:
+if boundmode:
     poi = tf.square(xpoi)
-    jacpoitheta = tf.diag(tf.concat([2.*xpoi,tf.ones([nsyst],dtype=dtype)],axis=0))
+    # not used in combine! FIXME
+    jacpoitheta = tf.diag(tf.concat([2.*xpoi, tf.ones([nsyst+nFree],dtype=dtype)], axis=0))
+else:
+    poi = xpoi
 
 xpoi = tf.identity(poi, name="xpoi")
 poi = tf.identity(poi, name=options.POIMode)
 theta = tf.identity(theta, name="theta")
+free = tf.identity(free, name="free")
 
-#interpolation for asymmetric log-normal
+# Create aliases for the now-defined free parameter variables
+freeParams = [ tf.identity(free[i], name=freeParamNames[i]) for i in range(nFree) ]
+
+# Put those aliases back into the rateParams dictionary for later use, skipping the extArgs
+counter = len(extArgs)
+for chan in chans:
+    for proc in procs:
+        for name in rateParams[chan][proc].keys():
+            # print("assigning {} to channel {}, proc {}, name {}".format(freeParams[counter], chan, proc, name))
+            rateParams[chan][proc][name] = freeParams[counter]
+            counter += 1
+
+# Create dependent rate parameters based on free parameters and formulas
+# and add them to the collection of rate parameters
+graph = tf.get_default_graph() # needed when executing the formulas translated above
+for chan in dependentRateParams.keys():
+    for proc in dependentRateParams[chan].keys():
+        for name, param in dependentRateParams[chan][proc].items():
+            formulaInputs = param[1]
+            formula = param[0].format(*formulaInputs)
+            # print("attempting to execute: {}".format(formula))
+            exec(name + "=" + formula)
+            exec("{0} = tf.identity({0}, name='{0}')".format(name))
+            # result = locals()[name]
+            result = graph.get_tensor_by_name(name + ":0")
+            # print("assigning {} to channel {}, proc {}, name {}".format(result, chan, proc, name))
+            rateParams[chan][proc][name] = result
+
+# Multiply rate parameters with the process and channel they correspond to (in all bins of that channel)
+rateParamInfos = []
+for chan in chans:
+    for proc in procs:
+        if len(rateParams[chan][proc]) > 1:
+            raise Exception("Only one rate param per process per channel is supported at the moment")
+        for p in rateParams[chan][proc].values():
+            rateParamInfos.append((chan, proc, p))
+rateParamTensor = tf.concat([[p[2]] for p in rateParamInfos], axis=0)
+nRate = len(rateParamInfos)
+
+rateParamMatrix = np.zeros((nbinstotal, nproc, nRate+1))
+rateParamVector = tf.concat([tf.constant([1.], dtype=dtype), rateParamTensor], axis=0)
+# rateParamVector = tf.reshape(rateParamVector, [-1, 1])
+
+for iparam, param in enumerate(rateParamInfos):
+    chan = param[0]
+    proc = param[1]
+    ichan = chans.index(chan)
+    iproc = procs.index(proc)
+
+    for ibin in range(nbins):
+        globalBin = ichan * nbins + ibin
+        rateParamMatrix[globalBin, iproc, iparam+1] = 1.
+        # print("channel {}, bin {}, global bin {}, process {}, assign: {}".format(chan, ibin, globalBin, proc, param[2]))
+
+for ichan in range(len(chans)):
+    for ibin in range(nbins):
+        globalBin = ichan * nbins + ibin
+        for iproc in range(nproc):
+            s = np.sum(rateParamMatrix[globalBin, iproc, :])
+            if s > 1:
+                raise Exception("something has gone wrong")
+            if s == 0:
+                rateParamMatrix[globalBin, iproc, 0] = 1.
+
+# np.set_printoptions(threshold=np.nan)
+# print(rateParamMatrix)
+
+rateParamMatrix = tf.constant(rateParamMatrix, dtype=dtype)
+# to be multiplied with expected numbers
+rRate = tf.tensordot(rateParamMatrix, rateParamVector, axes=[[2], [0]])
+# rRate = tf.reshape(rRate, [nbinstotal, nproc])
+
+# print(rateParamInfos)
+# print(freeParams)
+# print(rateParams)
+# print(dependentRateParams)
+# print(extArgs)
+
+# Interpolation for asymmetric log-normal
+
+logkavg = 0.5*(logkup+logkdown)
+logkhalfdiff = 0.5*(logkup-logkdown)
+
 twox = 2.*theta
 twox2 = twox*twox
 alpha = 0.125 * twox * (twox2 * (3*twox2 - 10.) + 15.)
@@ -356,7 +446,7 @@ alpha = tf.clip_by_value(alpha,-1.,1.)
 logk = logkavg + alpha*logkhalfdiff
 
 #matrix encoding effect of nuisance parameters
-logsnorm = tf.reduce_sum(logk*theta,axis=-1)
+logsnorm = tf.reduce_sum(logk * theta, axis=-1)
 snorm = tf.exp(logsnorm)
 
 #vector encoding effect of signal strengths
@@ -370,7 +460,7 @@ rnorm = tf.reshape(rnorm,[1,-1])
 
 #final expected yields per-bin including effect of signal
 #strengths and nuisance parmeters
-pnormfull = rnorm*snorm*norm
+pnormfull = rnorm*snorm*norm*rRate
 if nbinsmasked>0:
     pnorm = pnormfull[:nbinstotal-nbinsmasked]
 else:
@@ -400,6 +490,7 @@ lc = tf.reduce_sum(0.5*tf.square(theta - theta0))
 l = ln + lc
 l = tf.identity(l,name="loss")
 
+# not used in combine! FIXME
 lfull = lnfull + lc
 lfull = tf.identity(lfull,name="lossfull")
 

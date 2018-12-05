@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import pickle
 import re
 from sys import argv, stdout, stderr, exit, modules
 from optparse import OptionParser
@@ -40,8 +41,8 @@ parser.add_option("","--nThreads", default=-1., type=int, help="set number of th
 (options, args) = parser.parse_args()
 
 if len(args) == 0:
-        parser.print_usage()
-        exit(1)
+    parser.print_usage()
+    exit(1)
 
 seed = options.seed
 print(seed)
@@ -60,6 +61,8 @@ x = next((x for x in variables if x.name == 'x:0'), None)
 xpoi = graph.get_tensor_by_name("xpoi:0")
 theta = graph.get_tensor_by_name("theta:0")
 theta0 = next((x for x in variables if x.name == 'theta0:0'), None)
+free = graph.get_tensor_by_name("free:0")
+free0 = graph.get_tensor_by_name("free0:0")
 nexp = graph.get_tensor_by_name("nexp:0")
 nexpnom = graph.get_tensor_by_name("nexpnom:0")
 nobs = next((x for x in variables if x.name == 'nobs:0'), None)
@@ -69,19 +72,21 @@ outputs = tf.get_collection("outputs")
 cprocs = graph.get_tensor_by_name("cprocs:0")
 csignals = graph.get_tensor_by_name("csignals:0")
 csysts = graph.get_tensor_by_name("csysts:0")
+cfrees = graph.get_tensor_by_name("cfrees:0")
 cpois = graph.get_tensor_by_name("cpois:0")
 
 dtype = x.dtype.as_numpy_dtype
 npoi = cpois.shape[0]
 nsyst = csysts.shape[0]
-nparms = npoi + nsyst
+nFree = cfrees.shape[0]
+nparams = npoi + nsyst + nFree
 
 grad = tf.gradients(l,x)[0]
 hesscomp = JacobianCompute(grad,x)
 
 jaccomps = []
 for output in outputs:
-    jaccomps.append(JacobianCompute(tf.concat([output,theta],axis=0),x))
+    jaccomps.append(JacobianCompute(tf.concat([output, theta, free], axis=0), x))
 
 
 l0 = tf.Variable(np.zeros([],dtype=dtype),trainable=False)
@@ -90,13 +95,13 @@ a = tf.Variable(np.zeros([],dtype=dtype),trainable=False)
 errdir = tf.Variable(np.zeros(x.shape,dtype=dtype),trainable=False)
 dlconstraint = l - l0
 
-lb = np.concatenate((-np.inf*np.ones([npoi],dtype=dtype),-np.inf*np.ones([nsyst],dtype=dtype)),axis=0)
-ub = np.concatenate((np.inf*np.ones([npoi],dtype=dtype),np.inf*np.ones([nsyst],dtype=dtype)),axis=0)
+lb = np.concatenate((-np.inf*np.ones([npoi],dtype=dtype),-np.inf*np.ones([nsyst],dtype=dtype),np.zeros([nFree],dtype=dtype)),axis=0)
+ub = np.concatenate((np.inf*np.ones([npoi],dtype=dtype),np.inf*np.ones([nsyst+nFree],dtype=dtype)),axis=0)
 
 xtol = np.finfo(dtype).eps
 edmtol = math.sqrt(xtol)
 btol = 1e-8
-minimizer = ScipyTROptimizerInterface(l, var_list = [x], var_to_bounds={x: (lb,ub)}, options={'verbose': options.fitverbose, 'maxiter' : 100000, 'gtol' : 0., 'xtol' : xtol, 'barrier_tol' : btol})
+minimizer = ScipyTROptimizerInterface(l, var_list = [x], var_to_bounds={x: (lb,ub)}, options={'verbose': options.fitverbose, 'maxiter' : 500000, 'gtol' : 0., 'xtol' : xtol, 'barrier_tol' : btol})
 
 scanvars = {}
 scannames = []
@@ -104,7 +109,7 @@ scanvars["x"] = x
 scannames.append("x")
 for output in outputs:
     outname = ":".join(output.name.split(":")[:-1])
-    outputtheta = tf.concat([output,theta],axis=0)
+    outputtheta = tf.concat([output,theta,free],axis=0)
     scanvars[outname] = outputtheta
     scannames.append(outname)
 
@@ -114,8 +119,8 @@ for scanname in scannames:
     scanvar = scanvars[scanname]
     errproj = -tf.reduce_sum((scanvar-x0)*errdir,axis=0)
     dxconstraint = a + errproj
-    scanminimizer = ScipyTROptimizerInterface(l, var_list = [x], var_to_bounds={x: (lb,ub)},    equalities=[dxconstraint], options={'verbose': options.fitverbose, 'maxiter' : 100000, 'gtol' : 0., 'xtol' : xtol, 'barrier_tol' : btol})
-    minosminimizer = ScipyTROptimizerInterface(errproj, var_list = [x], var_to_bounds={x: (lb,ub)},    equalities=[dlconstraint], options={'verbose': options.fitverbose, 'maxiter' : 100000, 'gtol' : 0., 'xtol' : xtol, 'barrier_tol' : btol})
+    scanminimizer = ScipyTROptimizerInterface(l, var_list = [x], var_to_bounds={x: (lb,ub)}, equalities=[dxconstraint], options={'verbose': options.fitverbose, 'maxiter' : 100000, 'gtol' : 0., 'xtol' : xtol, 'barrier_tol' : btol})
+    minosminimizer = ScipyTROptimizerInterface(errproj, var_list = [x], var_to_bounds={x: (lb,ub)}, equalities=[dlconstraint], options={'verbose': options.fitverbose, 'maxiter' : 100000, 'gtol' : 0., 'xtol' : xtol, 'barrier_tol' : btol})
     scanminimizers[scanname] = scanminimizer
     minosminimizers[scanname] = minosminimizer
 
@@ -126,8 +131,8 @@ asimovassign = tf.assign(nobs,nexp)
 bootstrapassign = tf.assign(nobs,tf.random_poisson(nobs,shape=[],dtype=dtype))
 toyassign = tf.assign(nobs,tf.random_poisson(nexp,shape=[],dtype=dtype))
 frequentistassign = tf.assign(theta0,theta + tf.random_normal(shape=theta.shape,dtype=dtype))
-thetastartassign = tf.assign(x, tf.concat([xpoi,theta0],axis=0))
-bayesassign = tf.assign(x, tf.concat([xpoi,theta+tf.random_normal(shape=theta.shape,dtype=dtype)],axis=0))
+thetastartassign = tf.assign(x, tf.concat([xpoi,theta0,free0],axis=0))
+bayesassign = tf.assign(x, tf.concat([xpoi,theta+tf.random_normal(shape=theta.shape,dtype=dtype),free0],axis=0))
 
 #initialize tf session
 if options.nThreads>0:
@@ -140,11 +145,19 @@ sess.run(globalinit)
 
 #rthetav = np.concatenate((options.expectSignal*np.ones([npoi],dtype=dtype), np.zeros([nsyst],dtype=dtype)), axis=0)
 xv = sess.run(x)
+# print(xv)
+nexpv = sess.run(nexp)
+# print(nexpv)
+
 data_obs = sess.run(nobs)
-procs, signals, systs, pois = sess.run([cprocs,csignals,csysts,cpois])
+procs, signals, systs, frees, pois = sess.run([cprocs,csignals,csysts,cfrees,cpois])
 signals = signals.tolist()
 systs = systs.tolist()
 pois = pois.tolist()
+frees = frees.tolist()
+
+print("Parameters:")
+print(pois + systs + frees)
 
 #initialize output tree
 f = ROOT.TFile( 'fitresults_%i.root' % seed, 'recreate' )
@@ -313,17 +326,33 @@ for itoy in range(ntoys):
     sess.run(thetastartassign)
     #set likelihood offset
     sess.run(nexpnomassign)
+    # print(sess.run(grad))
     if dofit:
         ret = minimizer.minimize(sess)
 
     #get fit output
-    xval, outvalss, thetavals, theta0vals, nllval, gradval = sess.run([x,outputs,theta,theta0,l,grad])
+    xval, outvalss, thetavals, theta0vals, freevals, nllval, gradval = sess.run([x,outputs,theta,theta0,free,l,grad])
     #compute hessian
     hessval = hesscomp.compute(sess)
     #print(hessval.shape)
-    # print(hessval)
+    # np.set_printoptions(threshold=np.nan)
+    np.save('hessian', hessval)
+    print(hessval)
     dnllval = 0.
-    mineig = np.amin(np.linalg.eigvalsh(hessval))
+    # eigenValues = np.linalg.eigvalsh(hessval)
+    eigenValues, eigenVectors = np.linalg.eigh(hessval)
+    print("Eigenvalues:")
+    print(eigenValues)
+    print("Eigenvectors with smallest eigenvalue:")
+    varNames = pois + systs + frees
+    for i in range(5):
+        print("\tEigenvalue {} = {}".format(i, eigenValues[i]))
+        for j in range(10):
+            maxComp = np.argmax(np.abs(eigenVectors[:,i]))
+            print("{}-largest component: {}".format(j, varNames[maxComp]))
+            eigenVectors[maxComp,i] = 0
+
+    mineig = np.amin(eigenValues)
     isposdef =    mineig > 0.
     gradcol = np.reshape(gradval,[-1,1])
     try:
@@ -341,10 +370,11 @@ for itoy in range(ntoys):
 
     print("status = %i, errstatus = %i, nllval = %f, edmval = %e, mineigval = %e" % (status,errstatus,nllval,edmval,mineig))
 
-    fullsigmasv = np.sqrt(np.diag(invhessval))
     if errstatus==0:
+        fullsigmasv = np.sqrt(np.diag(invhessval))
         thetasigmasv = fullsigmasv[npoi:]
     else:
+        raise Exception()
         thetasigmasv = -99.*np.ones_like(thetavals)
 
     thetaminosups = -99.*np.ones_like(thetavals)
@@ -361,8 +391,8 @@ for itoy in range(ntoys):
 
         if not options.toys > 0:
             dName = 'asimov' if options.toys < 0 else 'data fit'
-            correlationHist = ROOT.TH2D('correlation_matrix_channel'+outname, 'correlation matrix for '+dName+' in channel'+outname, int(nparms), 0., 1., int(nparms), 0., 1.)
-            covarianceHist    = ROOT.TH2D('covariance_matrix_channel' +outname, 'covariance matrix for ' +dName+' in channel'+outname, int(nparms), 0., 1., int(nparms), 0., 1.)
+            correlationHist = ROOT.TH2D('correlation_matrix_channel'+outname, 'correlation matrix for '+dName+' in channel'+outname, int(nparams), 0., 1., int(nparams), 0., 1.)
+            covarianceHist    = ROOT.TH2D('covariance_matrix_channel' +outname, 'covariance matrix for ' +dName+' in channel'+outname, int(nparams), 0., 1., int(nparams), 0., 1.)
             correlationHist.GetZaxis().SetRangeUser(-1., 1.)
 
         if errstatus==0:
@@ -482,8 +512,8 @@ for itoy in range(ntoys):
             toutminosup[0] = minosup
             toutminosdown[0] = minosdown
             toutgenval[0] = outgenval
-            if itoy==0:
-                print('%s_%s = %e +- %f (+%f -%f)' % (poi,outname,outval,outma,minosup,minosdown))
+            # if itoy==0:
+            print('%s_%s = %e +- %f (+%f -%f)' % (poi,outname,outval,outma,minosup,minosdown))
 
     for syst,thetaval,theta0val,sigma,minosup,minosdown,thetagenval, tthetaval,ttheta0val,tthetaerr,tthetaminosup,tthetaminosdown,tthetagenval in zip(systs,thetavals,theta0vals,thetasigmasv,thetaminosups,thetaminosdowns,thetavalsgen, tthetavals,ttheta0vals,tthetaerrs,tthetaminosups,tthetaminosdowns,tthetagenvals):
         tthetaval[0] = thetaval
@@ -492,8 +522,8 @@ for itoy in range(ntoys):
         tthetaminosup[0] = minosup
         tthetaminosdown[0] = minosdown
         tthetagenval[0] = thetagenval
-        if itoy==0:
-            print('%s = %f +- %f (+%f -%f) (%s_In = %f)' % (syst, thetaval, sigma, minosup,minosdown,syst,theta0val))
+        # if itoy==0:
+        print('%s = %f +- %f (+%f -%f) (%s_In = %f)' % (syst, thetaval, sigma, minosup,minosdown,syst,theta0val))
 
     tree.Fill()
 

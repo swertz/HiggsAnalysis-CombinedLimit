@@ -228,6 +228,8 @@ for chan in chans:
 #print(np.max(np.abs(logkup)))
 #print(np.max(np.abs(logkdown)))
 
+## Fetch all the rate parameters in the datacard
+
 rateParams = {}
 for chan in chans:
     rateParams[chan] = {}
@@ -236,16 +238,13 @@ for chan in chans:
 dependentRateParams = deepcopy(rateParams)
 
 regex = re.compile(r'@([0-9]*)')
-# def get_tf_variable(name):
-    # return [var for var in tf.global_variables() if str(var.op.name) == name][0]
-
 for rp in DC.rateParams.items():
     paramKey = rp[0]
     channel = paramKey.split('AND')[0]
     proc = paramKey.split('AND')[1]
     paramCfg = rp[1][0]
     
-    # FIXME bounds not used at the momemt
+    # FIXME bounds not used at the momemt -> need to propagate to constraint in minimizer
     if paramCfg[1] == '':
         bounds = None
     else:
@@ -259,12 +258,10 @@ for rp in DC.rateParams.items():
         default = float(paramCfg[1])
         rateParams[channel][proc][name] = default
         # print("Param {}: default value = {}".format(name, default))
-        # rateParams[channel][proc][name] = tf.Variable(default, dtype=dtype, name=name)
 
     if paramCfg[-1] == 1:
-        # dependent parameter
+        # parameter dependent on other parameters
         formula = paramCfg[1]
-        # formula = regex.sub(lambda x: 'get_tf_variable("{' + x.group(0).replace('@', '') + '}")', formula)
         formula = regex.sub(lambda x: 'graph.get_tensor_by_name("{' + x.group(0).replace('@', '') + '}:0")', formula)
         formulaInputs = paramCfg[2].split(',')
 
@@ -273,11 +270,9 @@ for rp in DC.rateParams.items():
 extArgs = {}
 for rp in DC.extArgs.items():
     name = rp[0]
-    # FIXME bounds not used at the momemt
+    # FIXME bounds not used at the moment -> need to propagate to constraint in minimizer
     default = float(rp[1][2])
     extArgs[name] = default
-    # print("Param {}: default value = {}".format(name, default))
-    # extArgs[name] = tf.Variable(float(rp[1][2]), dtype=dtype, name=name)
 
 # freeParams only contains standalone parameters to be fitted
 freeParamDefault = extArgs.values()
@@ -307,8 +302,8 @@ elif options.POIMode == "none":
 else:
     raise Exception("unsupported POIMode")
 
-nparams = npoi + nsyst + nFree
-params = pois + systs + freeParamNames
+nparams = npoi + nFree + nsyst
+params = pois + freeParamNames + systs
 
 if boundmode:
     xpoidefault = np.sqrt(poidefault)
@@ -319,11 +314,9 @@ print("nbins = %d, npoi = %d, nsyst = %d, nFree = %d" % (data_obs.shape[0], npoi
 
 cprocs = tf.constant(procs,name="cprocs")
 csignals = tf.constant(signals, name="csignals")
-# csysts = tf.concat([tf.constant(systs), tf.constant(freeParamNames)], axis=0, name="csysts")
 csysts = tf.constant(systs, name="csysts")
-cfrees = tf.constant(freeParamNames, name="cfrees")
 cmaskedchans = tf.constant(maskedchans, name="cmaskedchans")
-cpois = tf.constant(pois, name="cpois")
+cpois = tf.constant(pois + freeParamNames, name="cpois")
 
 # data
 nobs = tf.Variable(data_obs, trainable=False, name="nobs")
@@ -331,32 +324,34 @@ nobs = tf.Variable(data_obs, trainable=False, name="nobs")
 theta0 = tf.Variable(tf.zeros([nsyst], dtype=dtype), trainable=False, name="theta0")
 
 # tf variable containing all fit parameters
+# the free parameters will be treated as POIs in the fit but they are kept separated here
 thetadefault = tf.zeros([nsyst], dtype=dtype)
 freeParamDefault = tf.constant(freeParamDefault, dtype=dtype, name="free0")
 if npoi > 0:
-    xdefault = tf.concat([xpoidefault, thetadefault, freeParamDefault], axis=0)
+    xdefault = tf.concat([xpoidefault, freeParamDefault, thetadefault], axis=0)
 else:
     xdefault = tf.concact([thetadefault, freeParamDefault], axis=0)
 
 x = tf.Variable(xdefault, name='x')
 
 xpoi = x[:npoi]
-theta = x[npoi:npoi+nsyst]
-free = x[npoi+nsyst:]
+free = x[npoi:npoi+nFree]
+theta = x[npoi+nFree:]
 
 if boundmode:
     poi = tf.square(xpoi)
     # not used in combine! FIXME
-    jacpoitheta = tf.diag(tf.concat([2.*xpoi, tf.ones([nsyst+nFree],dtype=dtype)], axis=0))
+    jacpoitheta = tf.diag(tf.concat([2.*xpoi, tf.ones([nFree+nsyst],dtype=dtype)], axis=0))
 else:
     poi = xpoi
 
 xpoi = tf.identity(poi, name="xpoi")
 poi = tf.identity(poi, name=options.POIMode)
-theta = tf.identity(theta, name="theta")
 free = tf.identity(free, name="free")
+theta = tf.identity(theta, name="theta")
 
-# Create aliases for the now-defined free parameter variables
+# Create aliases for the now-defined free parameter variables 
+# -> to be retrieved when interpreting formulas for dependent rate parameters
 freeParams = [ tf.identity(free[i], name=freeParamNames[i]) for i in range(nFree) ]
 
 # Put those aliases back into the rateParams dictionary for later use, skipping the extArgs
@@ -377,6 +372,7 @@ for chan in dependentRateParams.keys():
             formulaInputs = param[1]
             formula = param[0].format(*formulaInputs)
             # print("attempting to execute: {}".format(formula))
+            # FIXME strictly speaking this is a security problem
             exec(name + "=" + formula)
             exec("{0} = tf.identity({0}, name='{0}')".format(name))
             # result = locals()[name]
@@ -384,7 +380,10 @@ for chan in dependentRateParams.keys():
             # print("assigning {} to channel {}, proc {}, name {}".format(result, chan, proc, name))
             rateParams[chan][proc][name] = result
 
-# Multiply rate parameters with the process and channel they correspond to (in all bins of that channel)
+# Multiply rate parameters with the process and channel they correspond to (in all bins of that channel!)
+# This is implemented as r=M*[1,v].T where M is a matrix and v is the vector of rate parameters
+# The row of M corresponds to a process and the column to a rate parameter: simply set the element to 1 if that process is to be scaled with the parameter.
+# By default, M[i,0]=1 so that the process is not scaled if there is no corresponding rate parameter.
 rateParamInfos = []
 for chan in chans:
     for proc in procs:
@@ -397,7 +396,6 @@ nRate = len(rateParamInfos)
 
 rateParamMatrix = np.zeros((nbinstotal, nproc, nRate+1))
 rateParamVector = tf.concat([tf.constant([1.], dtype=dtype), rateParamTensor], axis=0)
-# rateParamVector = tf.reshape(rateParamVector, [-1, 1])
 
 for iparam, param in enumerate(rateParamInfos):
     chan = param[0]
@@ -416,7 +414,7 @@ for ichan in range(len(chans)):
         for iproc in range(nproc):
             s = np.sum(rateParamMatrix[globalBin, iproc, :])
             if s > 1:
-                raise Exception("something has gone wrong")
+                raise Exception("Something has gone wrong: only one rate param per process per channel is supported at the moment")
             if s == 0:
                 rateParamMatrix[globalBin, iproc, 0] = 1.
 
@@ -426,7 +424,6 @@ for ichan in range(len(chans)):
 rateParamMatrix = tf.constant(rateParamMatrix, dtype=dtype)
 # to be multiplied with expected numbers
 rRate = tf.tensordot(rateParamMatrix, rateParamVector, axes=[[2], [0]])
-# rRate = tf.reshape(rRate, [nbinstotal, nproc])
 
 # print(rateParamInfos)
 # print(freeParams)
@@ -509,7 +506,7 @@ pmaskedexpnorm = tf.identity(pmaskedexpnorm,"pmaskedexpnorm")
 
 outputs = []
 
-outputs.append(poi)
+outputs.append(tf.concat([poi, free], axis=0))
 if nbinsmasked>0:
     outputs.append(pmaskedexp)
     outputs.append(pmaskedexpnorm)

@@ -59,10 +59,9 @@ graph = tf.get_default_graph()
 l = graph.get_tensor_by_name("loss:0")
 x = next((x for x in variables if x.name == 'x:0'), None)
 xpoi = graph.get_tensor_by_name("xpoi:0")
+xfree = graph.get_tensor_by_name("free:0")
 theta = graph.get_tensor_by_name("theta:0")
 theta0 = next((x for x in variables if x.name == 'theta0:0'), None)
-free = graph.get_tensor_by_name("free:0")
-free0 = graph.get_tensor_by_name("free0:0")
 nexp = graph.get_tensor_by_name("nexp:0")
 nexpnom = graph.get_tensor_by_name("nexpnom:0")
 nobs = next((x for x in variables if x.name == 'nobs:0'), None)
@@ -72,21 +71,19 @@ outputs = tf.get_collection("outputs")
 cprocs = graph.get_tensor_by_name("cprocs:0")
 csignals = graph.get_tensor_by_name("csignals:0")
 csysts = graph.get_tensor_by_name("csysts:0")
-cfrees = graph.get_tensor_by_name("cfrees:0")
 cpois = graph.get_tensor_by_name("cpois:0")
 
 dtype = x.dtype.as_numpy_dtype
-npoi = cpois.shape[0]
+npoi = cpois.shape[0] # note: includes free parameters!
 nsyst = csysts.shape[0]
-nFree = cfrees.shape[0]
-nparams = npoi + nsyst + nFree
+nparams = npoi + nsyst
 
 grad = tf.gradients(l,x)[0]
 hesscomp = JacobianCompute(grad,x)
 
 jaccomps = []
 for output in outputs:
-    jaccomps.append(JacobianCompute(tf.concat([output, theta, free], axis=0), x))
+    jaccomps.append(JacobianCompute(tf.concat([output, theta], axis=0), x))
 
 
 l0 = tf.Variable(np.zeros([],dtype=dtype),trainable=False)
@@ -95,8 +92,8 @@ a = tf.Variable(np.zeros([],dtype=dtype),trainable=False)
 errdir = tf.Variable(np.zeros(x.shape,dtype=dtype),trainable=False)
 dlconstraint = l - l0
 
-lb = np.concatenate((-np.inf*np.ones([npoi],dtype=dtype),-np.inf*np.ones([nsyst],dtype=dtype),np.zeros([nFree],dtype=dtype)),axis=0)
-ub = np.concatenate((np.inf*np.ones([npoi],dtype=dtype),np.inf*np.ones([nsyst+nFree],dtype=dtype)),axis=0)
+lb = np.concatenate((-np.inf*np.ones([npoi],dtype=dtype),-np.inf*np.ones([nsyst],dtype=dtype)),axis=0)
+ub = np.concatenate((np.inf*np.ones([npoi],dtype=dtype),np.inf*np.ones([nsyst],dtype=dtype)),axis=0)
 
 # Minimizer for maximum likelihood fit
 xtol = np.finfo(dtype).eps
@@ -110,7 +107,7 @@ scanvars["x"] = x
 scannames.append("x")
 for output in outputs:
     outname = ":".join(output.name.split(":")[:-1])
-    outputtheta = tf.concat([output,theta,free],axis=0)
+    outputtheta = tf.concat([output,theta],axis=0)
     scanvars[outname] = outputtheta
     scannames.append(outname)
 
@@ -132,8 +129,8 @@ asimovassign = tf.assign(nobs,nexp)
 bootstrapassign = tf.assign(nobs,tf.random_poisson(nobs,shape=[],dtype=dtype))
 toyassign = tf.assign(nobs,tf.random_poisson(nexp,shape=[],dtype=dtype))
 frequentistassign = tf.assign(theta0,theta + tf.random_normal(shape=theta.shape,dtype=dtype))
-thetastartassign = tf.assign(x, tf.concat([xpoi,theta0,free0],axis=0))
-bayesassign = tf.assign(x, tf.concat([xpoi,theta+tf.random_normal(shape=theta.shape,dtype=dtype),free0],axis=0))
+thetastartassign = tf.assign(x, tf.concat([xpoi,xfree,theta0],axis=0))
+bayesassign = tf.assign(x, tf.concat([xpoi,xfree,theta+tf.random_normal(shape=theta.shape,dtype=dtype)],axis=0))
 
 #initialize tf session
 if options.nThreads>0:
@@ -151,14 +148,13 @@ nexpv = sess.run(nexp)
 # print(nexpv)
 
 data_obs = sess.run(nobs)
-procs, signals, systs, frees, pois = sess.run([cprocs,csignals,csysts,cfrees,cpois])
+procs, signals, systs, pois = sess.run([cprocs,csignals,csysts,cpois])
 signals = signals.tolist()
 systs = systs.tolist()
 pois = pois.tolist()
-frees = frees.tolist()
 
 print("Parameters:")
-print(pois + systs + frees)
+print(pois + systs)
 
 #initialize output tree
 f = ROOT.TFile( 'fitresults_%i.root' % seed, 'recreate' )
@@ -332,7 +328,7 @@ for itoy in range(ntoys):
         ret = minimizer.minimize(sess)
 
     #get fit output
-    xval, outvalss, thetavals, theta0vals, freevals, nllval, gradval = sess.run([x,outputs,theta,theta0,free,l,grad])
+    xval, outvalss, thetavals, theta0vals, nllval, gradval = sess.run([x,outputs,theta,theta0,l,grad])
     #compute hessian
     hessval = hesscomp.compute(sess)
     eigenValues, eigenVectors = np.linalg.eigh(hessval)
@@ -357,21 +353,21 @@ for itoy in range(ntoys):
 
     print("status = %i, errstatus = %i, nllval = %f, edmval = %e, mineigval = %e" % (status,errstatus,nllval,edmval,mineig))
     
-    if status > 0 or errstatus > 0 or itoy == 0:
-        # np.set_printoptions(threshold=np.nan)
-        # np.save('hessian_toy_{}'.format(itoy), hessval)
-        print("Hessian:")
-        print(hessval)
-        print("Eigenvalues:")
-        print(eigenValues)
-        print("Eigenvectors with smallest eigenvalue:")
-        varNames = pois + systs + frees
-        for i in range(5):
-            print("\tEigenvalue {} = {}".format(i, eigenValues[i]))
-            for j in range(10):
-                maxComp = np.argmax(np.abs(eigenVectors[:,i]))
-                print("\t\t{}-largest component: {}".format(j+1, varNames[maxComp]))
-                eigenVectors[maxComp,i] = 0
+    # if status > 0 or errstatus > 0 or itoy == 0:
+        # # np.set_printoptions(threshold=np.nan)
+        # # np.save('hessian_toy_{}'.format(itoy), hessval)
+        # print("Hessian:")
+        # print(hessval)
+        # print("Eigenvalues:")
+        # print(eigenValues)
+        # print("Eigenvectors with smallest eigenvalue:")
+        # varNames = pois + systs
+        # for i in range(5):
+            # print("\tEigenvalue {} = {}".format(i, eigenValues[i]))
+            # for j in range(10):
+                # maxComp = np.argmax(np.abs(eigenVectors[:,i]))
+                # print("\t\t{}-largest component: {}".format(j+1, varNames[maxComp]))
+                # eigenVectors[maxComp,i] = 0
 
     if errstatus==0:
         fullsigmasv = np.sqrt(np.diag(invhessval))

@@ -98,6 +98,7 @@ dlconstraint = l - l0
 lb = np.concatenate((-np.inf*np.ones([npoi],dtype=dtype),-np.inf*np.ones([nsyst],dtype=dtype),np.zeros([nFree],dtype=dtype)),axis=0)
 ub = np.concatenate((np.inf*np.ones([npoi],dtype=dtype),np.inf*np.ones([nsyst+nFree],dtype=dtype)),axis=0)
 
+# Minimizer for maximum likelihood fit
 xtol = np.finfo(dtype).eps
 edmtol = math.sqrt(xtol)
 btol = 1e-8
@@ -334,26 +335,12 @@ for itoy in range(ntoys):
     xval, outvalss, thetavals, theta0vals, freevals, nllval, gradval = sess.run([x,outputs,theta,theta0,free,l,grad])
     #compute hessian
     hessval = hesscomp.compute(sess)
-    #print(hessval.shape)
-    # np.set_printoptions(threshold=np.nan)
-    np.save('hessian', hessval)
-    print(hessval)
-    dnllval = 0.
-    # eigenValues = np.linalg.eigvalsh(hessval)
     eigenValues, eigenVectors = np.linalg.eigh(hessval)
-    print("Eigenvalues:")
-    print(eigenValues)
-    print("Eigenvectors with smallest eigenvalue:")
-    varNames = pois + systs + frees
-    for i in range(5):
-        print("\tEigenvalue {} = {}".format(i, eigenValues[i]))
-        for j in range(10):
-            maxComp = np.argmax(np.abs(eigenVectors[:,i]))
-            print("{}-largest component: {}".format(j, varNames[maxComp]))
-            eigenVectors[maxComp,i] = 0
+    #print(hessval.shape)
+    dnllval = 0.
 
     mineig = np.amin(eigenValues)
-    isposdef =    mineig > 0.
+    isposdef = mineig > 0.
     gradcol = np.reshape(gradval,[-1,1])
     try:
         invhessval = np.linalg.inv(hessval)
@@ -369,12 +356,27 @@ for itoy in range(ntoys):
         status = 1
 
     print("status = %i, errstatus = %i, nllval = %f, edmval = %e, mineigval = %e" % (status,errstatus,nllval,edmval,mineig))
+    
+    if status > 0 or errstatus > 0 or itoy == 0:
+        # np.set_printoptions(threshold=np.nan)
+        # np.save('hessian_toy_{}'.format(itoy), hessval)
+        print("Hessian:")
+        print(hessval)
+        print("Eigenvalues:")
+        print(eigenValues)
+        print("Eigenvectors with smallest eigenvalue:")
+        varNames = pois + systs + frees
+        for i in range(5):
+            print("\tEigenvalue {} = {}".format(i, eigenValues[i]))
+            for j in range(10):
+                maxComp = np.argmax(np.abs(eigenVectors[:,i]))
+                print("\t\t{}-largest component: {}".format(j+1, varNames[maxComp]))
+                eigenVectors[maxComp,i] = 0
 
     if errstatus==0:
         fullsigmasv = np.sqrt(np.diag(invhessval))
         thetasigmasv = fullsigmasv[npoi:]
     else:
-        raise Exception()
         thetasigmasv = -99.*np.ones_like(thetavals)
 
     thetaminosups = -99.*np.ones_like(thetavals)
